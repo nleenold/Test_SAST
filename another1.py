@@ -2,7 +2,7 @@ from flask import Flask, render_template_string, redirect, url_for, request, ses
 import random
 
 app = Flask(__name__)
-app.secret_key = 'insecure_secret'
+
 
 # Data stores
 users = {}  # username -> password
