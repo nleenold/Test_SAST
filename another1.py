@@ -1,6 +1,41 @@
 from flask import Flask, render_template_string, redirect, url_for, request, session, flash
 import random
+# 1. Session Fixation - Don't regenerate session on login
+# 2. No IDOR protections: anyone can delete any post by URL manipulation
+# 3. No rate limiting: unlimited login attempts or posts
+# 4. Plaintext passwords, no HTTPS
+# 5. No logging of suspicious activity
 
+@app.route('/login', methods=['POST'])
+def login():
+    username = request.form['username']
+    password = request.form['password']
+    # No password hashing
+    if users.get(username) == password:
+        # NOT regenerating session ID! (Session fixation risk)
+        session['user'] = username
+        return redirect(url_for('feed'))
+    flash('Invalid credentials')
+    return redirect(url_for('login'))
+
+@app.route('/delete/<int:post_id>')
+def delete_post(post_id):
+    # No auth check, IDOR vulnerability
+    if post_id in posts:
+        del posts[post_id]
+        del comments[post_id]
+    return redirect(url_for('feed'))
+
+# 6. No input validation for content, allowing injection
+@app.route('/post', methods=['POST'])
+def create_post():
+    global post_counter
+    content = request.form['content']
+    # No sanitization, XSS possible
+    posts[post_counter] = {'author': session.get('user', 'Anonymous'), 'content': content}
+    comments[post_counter] = []
+    post_counter += 1
+    return redirect(url_for('feed'))
 app = Flask(__name__)
 
 
