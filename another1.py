@@ -37,7 +37,7 @@ def create_post():
     post_counter += 1
     return redirect(url_for('feed'))
 app = Flask(__name__)
-
+app.secret_key = 'insecure_secret' 
 
 # Data stores
 users = {}  # username -> password
