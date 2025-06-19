@@ -5,14 +5,10 @@ app = Flask(__name__)
 app.secret_key = 'insecure_secret'
 
 # Data stores
-products = {
-    1: {'name': 'Laptop', 'price': 999.99},
-    2: {'name': 'Smartphone', 'price': 599.99},
-    3: {'name': 'Headphones', 'price': 199.99},
-    4: {'name': 'Keyboard', 'price': 49.99}
-}
 users = {}  # username -> password
-orders = []
+posts = {}  # post_id -> {'author': username, 'content': content}
+comments = {}  # post_id -> list of {'author': username, 'comment': comment}
+post_counter = 1
 
 # --- User Registration ---
 @app.route('/register', methods=['GET', 'POST'])
@@ -20,10 +16,10 @@ def register():
     if request.method == 'POST':
         username = request.form['username']
         password = request.form['password']
-        # Non-validated duplicate registration overwrites existing user
+        # Overwrite existing users without validation
         users[username] = password
         session['user'] = username
-        return redirect(url_for('product_list'))
+        return redirect(url_for('feed'))
     return render_template_string('''
         <h2>Register</h2>
         <form method="POST">
@@ -41,7 +37,7 @@ def login():
         password = request.form['password']
         if users.get(username) == password:
             session['user'] = username
-            return redirect(url_for('product_list'))
+            return redirect(url_for('feed'))
         flash('Invalid credentials')
     return render_template_string('''
         <h2>Login</h2>
@@ -52,144 +48,101 @@ def login():
         </form>
     ''')
 
-# --- Product List ---
-@app.route('/')
-def product_list():
+# --- User Logout ---
+@app.route('/logout')
+def logout():
+    session.pop('user', None)
+    return redirect(url_for('feed'))
+
+# --- Create a Post ---
+@app.route('/post', methods=['GET', 'POST'])
+def create_post():
+    global post_counter
+    if not session.get('user'):
+        return redirect(url_for('login'))
+    if request.method == 'POST':
+        content = request.form['content']
+        # No sanitization, allow XSS
+        posts[post_counter] = {'author': session['user'], 'content': content}
+        comments[post_counter] = []
+        post_counter += 1
+        return redirect(url_for('feed'))
     return render_template_string('''
-        <h1>Product Catalog</h1>
+        <h2>Create a Post</h2>
+        <form method="POST">
+            Content: <textarea name="content"></textarea>
+            <button type="submit">Post</button>
+        </form>
+        <a href="{{ url_for('feed') }}">Back to Feed</a>
+    ''')
+
+# --- Feed (Show posts and comments) ---
+@app.route('/')
+def feed():
+    # No pagination, no filtering
+    sorted_posts = sorted(posts.items(), key=lambda x: x[0], reverse=True)
+    return render_template_string('''
+        <h1>Social Feed</h1>
         {% if session.get('user') %}
-            <p>Welcome, {{ session['user'] }}! <a href="{{ url_for('logout') }}">Logout</a></p>
+            <p>Logged in as {{ session['user'] }} | <a href="{{ url_for('logout') }}">Logout</a></p>
+            <a href="{{ url_for('create_post') }}">Create Post</a>
         {% else %}
             <a href="{{ url_for('login') }}">Login</a> | <a href="{{ url_for('register') }}">Register</a>
         {% endif %}
-        <ul>
-            {% for pid, product in products.items() %}
-                <li>
-                    <b>{{ product.name }}</b> - ${{ product.price }}
-                    <a href="{{ url_for('add_to_cart', product_id=pid) }}">Add to Cart</a>
-                </li>
-            {% endfor %}
-        </ul>
-        <a href="{{ url_for('view_cart') }}">View Cart</a>
-        {% if session.get('user') == 'admin' %}
-            <br><a href="{{ url_for('admin_add_product') }}">Add Product (Admin)</a>
-        {% endif %}
-    ''', products=products)
+        <hr />
+        {% for post_id, post in sorted_posts %}
+            <div style="border:1px solid #ccc; padding:10px; margin-bottom:10px;">
+                <p><b>{{ post.author }}</b> says:</p>
+                <p>{{ post.content }}</p>
+                <a href="{{ url_for('add_comment', post_id=post_id) }}">Comment</a>
+                <a href="{{ url_for('view_comments', post_id=post_id) }}">View Comments</a>
+                <a href="{{ url_for('delete_post', post_id=post_id) }}">Delete Post</a> <!-- No auth check -->
+            </div>
+        {% endfor %}
+    ''', sorted_posts=sorted_posts)
 
-# --- Add to Cart ---
-@app.route('/add/<int:product_id>')
-def add_to_cart(product_id):
-    cart = session.get('cart', {})
-    cart[str(product_id)] = cart.get(str(product_id), 0) + 1
-    session['cart'] = cart
-    return redirect(url_for('product_list'))
-
-# --- View Cart ---
-@app.route('/cart')
-def view_cart():
-    cart = session.get('cart', {})
-    cart_items = []
-    total = 0
-    for pid, qty in cart.items():
-        product = products.get(int(pid))
-        if not product:
-            # Bug: silently skipping invalid product IDs
-            continue
-        subtotal = product['price'] * qty
-        total += subtotal
-        cart_items.append({
-            'name': product['name'],
-            'price': product['price'],
-            'quantity': qty,
-            'subtotal': subtotal
-        })
-    return render_template_string('''
-        <h1>Your Shopping Cart</h1>
-        {% if cart_items %}
-            <ul>
-                {% for item in cart_items %}
-                    <li>{{ item.name }} - ${{ item.price }} x {{ item.quantity }} = ${{ item.subtotal }}</li>
-                {% endfor %}
-            </ul>
-            <h3>Total: ${{ total }}</h3>
-            {% if session.get('user') %}
-                <form method="POST" action="{{ url_for('checkout') }}">
-                    <button type="submit">Checkout</button>
-                </form>
-            {% else %}
-                <p>Please <a href="{{ url_for('login') }}">log in</a> to checkout.</p>
-            {% endif %}
-        {% else %}
-            <p>Your cart is empty.</p>
-        {% endif %}
-        <a href="{{ url_for('product_list') }}">Back to Products</a>
-    ''', cart_items=cart_items, total=total)
-
-# --- Checkout ---
-@app.route('/checkout', methods=['POST'])
-def checkout():
+# --- Add comment (no validation, XSS vulnerable) ---
+@app.route('/comment/<int:post_id>', methods=['GET', 'POST'])
+def add_comment(post_id):
     if not session.get('user'):
         return redirect(url_for('login'))
-    # Bug: No validation, no confirmation, no stock check
-    # Order data stored without validation, potential for inconsistent data
-    order_id = random.randint(10000, 99999)
-    order = {
-        'order_id': order_id,
-        'user': session['user'],
-        'items': session.get('cart', {})
-    }
-    orders.append(order)
-    session.pop('cart', None)
-    return render_template_string('''
-        <h2>Order Confirmation</h2>
-        <p>Thank you, {{ session['user'] }}! Your order ID is {{ order_id }}.</p>
-        <p>Order contains: {{ order.items }}</p>
-        <a href="{{ url_for('product_list') }}">Back to Shop</a>
-    ''', order_id=order['order_id'], order=order)
-
-# --- Admin Add Product (No validation, insecure) ---
-@app.route('/admin/add_product', methods=['GET', 'POST'])
-def admin_add_product():
-    # No auth check
     if request.method == 'POST':
-        name = request.form['name']
-        price = float(request.form['price'])
-        new_id = max(products.keys()) + 1
-        products[new_id] = {'name': name, 'price': price}
-        return redirect(url_for('product_list'))
+        comment = request.form['comment']
+        # No sanitization, bad practice
+        comments[post_id].append({'author': session['user'], 'comment': comment})
+        return redirect(url_for('view_comments', post_id=post_id))
     return render_template_string('''
-        <h2>Add Product (Admin)</h2>
+        <h2>Add Comment</h2>
         <form method="POST">
-            Name: <input name="name" />
-            Price: <input name="price" type="number" step="0.01" />
-            <button type="submit">Add</button>
+            Comment: <textarea name="comment"></textarea>
+            <button type="submit">Add Comment</button>
         </form>
+        <a href="{{ url_for('feed') }}">Back to Feed</a>
     ''')
 
-# --- Show Order Details (possible infinite loop bug) ---
-@app.route('/order/<int:order_id>')
-def show_order(order_id):
-    order = next((o for o in orders if o['order_id'] == order_id), None)
-    if not order:
-        return "Order not found", 404
-    # Bug: Infinite loop if order references itself (not in current code but potential future bug)
-    # For demonstration, we simulate a bug with recursive call (not implemented here for simplicity)
-    items_html = ""
-    for pid, qty in order['items'].items():
-        product = products.get(int(pid))
-        if product:
-            items_html += f"<li>{product['name']} x {qty}</li>"
+# --- View comments ---
+@app.route('/comments/<int:post_id>')
+def view_comments(post_id):
+    post_comments = comments.get(post_id, [])
     return render_template_string('''
-        <h2>Order #{{ order['order_id'] }}</h2>
+        <h2>Comments for Post {{ post_id }}</h2>
         <ul>
-            ''' + items_html + '''
+            {% for c in post_comments %}
+                <li><b>{{ c.author }}</b>: {{ c.comment }}</li>
+            {% endfor %}
         </ul>
-    ''', order=order)
+        <a href="{{ url_for('feed') }}">Back to Feed</a>
+    ''', post_id=post_id, post_comments=post_comments)
 
-# --- Utility functions for bugs ---
-def simulate_infinite_loop():
-    # Placeholder to demonstrate potential infinite loop bug
-    pass
+# --- Delete Post (no auth, no check) ---
+@app.route('/delete/<int:post_id>')
+def delete_post(post_id):
+    # Insecure: no auth, anyone can delete any post
+    if post_id in posts:
+        del posts[post_id]
+        del comments[post_id]
+    return redirect(url_for('feed'))
 
+# --- Run app ---
 if __name__ == '__main__':
     app.run(debug=True)
